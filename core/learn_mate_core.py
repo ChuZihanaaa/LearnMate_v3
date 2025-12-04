@@ -35,34 +35,91 @@ rag_cache = dc.Cache(CACHE_DIR)
 
 # ------------------- PDF 预处理函数 -------------------
 def preprocess_pdf(pdf_path: str):
-    """从 PDF 提取 → 清洗 → 分块 → 存入 output/"""
+    """处理 PDF 文件"""
     print(f"正在处理 PDF: {pdf_path}")
-
-    # 1. 提取文本
     doc = fitz.open(pdf_path)
     text = ""
     for page in doc:
         text += page.get_text()
-    with open(os.path.join(OUTPUT_DIR, "extracted_text.txt"), "w", encoding="utf-8") as f:
-        f.write(text)
-    print(f"提取完成，长度: {len(text)}")
 
-    # 2. 清洗
+    # 清洗逻辑
     cleaned_text = re.sub(r'\n+', ' ', text)
     cleaned_text = re.sub(r'[^\w\s\u4e00-\u9fff]', '', cleaned_text)
-    with open(os.path.join(OUTPUT_DIR, "cleaned_text.txt"), "w", encoding="utf-8") as f:
+
+    # 调用通用分块
+    return split_and_save_chunks(cleaned_text, os.path.basename(pdf_path))
+
+
+# --- SRT 字幕处理函数 ---
+def preprocess_srt(srt_path: str):
+    """
+    读取 .srt 字幕文件 -> 去除时间轴和序号 -> 清洗 -> 调用通用分块
+    """
+    print(f"正在处理字幕: {srt_path}")
+
+    if not os.path.exists(srt_path):
+        print(f"错误：文件不存在 {srt_path}")
+        return
+
+    with open(srt_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    text_content = []
+    for line in lines:
+        line = line.strip()
+        # 1. 跳过纯数字（字幕序号）
+        if line.isdigit():
+            continue
+        # 2. 跳过时间轴 (格式如 00:00:20,000 --> 00:00:24,400)
+        if '-->' in line:
+            continue
+        # 3. 跳过空行
+        if not line:
+            continue
+
+        # 将有效文本加入列表
+        text_content.append(line)
+
+    # 合并为完整文本（用空格连接，避免单词粘连）
+    full_text = " ".join(text_content)
+
+    # 简单的清洗（与 PDF 类似）
+    # 去除多余空格
+    cleaned_text = re.sub(r'\s+', ' ', full_text)
+
+    # 保存一份清洗后的全文本备份（可选，方便调试）
+    base_name = os.path.basename(srt_path)
+    with open(os.path.join(OUTPUT_DIR, f"cleaned_{base_name}.txt"), "w", encoding="utf-8") as f:
         f.write(cleaned_text)
-    print(f"清洗完成，长度: {len(cleaned_text)}")
 
-    # 3. 分块
+    # 调用通用分块函数
+    return split_and_save_chunks(cleaned_text, base_name)
+
+# ---通用分块与保存函数 ---
+def split_and_save_chunks(text: str, source_filename: str):
+    """
+    通用函数：接收清洗后的文本，分块并保存。
+    文件名格式：chunk_{source_filename}_{i}.txt (避免覆盖)
+    """
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    chunks = splitter.split_text(cleaned_text)
-    for i, chunk in enumerate(chunks):
-        with open(os.path.join(OUTPUT_DIR, f"chunk_{i}.txt"), "w", encoding="utf-8") as f:
-            f.write(chunk)
-    print(f"分块完成，总计 {len(chunks)} 个块")
-    return chunks
+    chunks = splitter.split_text(text)
 
+    # 获取不带后缀的文件名，作为前缀 (例如 "Chapter 2")
+    base_name = os.path.splitext(os.path.basename(source_filename))[0]
+    # 清理文件名中的空格，避免后续处理麻烦
+    base_name = base_name.replace(" ", "_")
+
+    print(f"正在为 {base_name} 生成分块...")
+    count = 0
+    for i, chunk in enumerate(chunks):
+        # 关键修改：文件名包含来源标识
+        out_name = f"chunk_{base_name}_{i}.txt"
+        with open(os.path.join(OUTPUT_DIR, out_name), "w", encoding="utf-8") as f:
+            f.write(chunk)
+        count += 1
+
+    print(f"[{source_filename}] 处理完成，生成 {count} 个分块。")
+    return chunks
 
 # ------------------- 构建向量库 -------------------
 def build_vectorstore():

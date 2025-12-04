@@ -8,10 +8,14 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_classic.chains import RetrievalQA
 from langchain_classic.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
+import re
 
 from functools import lru_cache
 import diskcache as dc
 import hashlib
+
+
+from langchain_classic.output_parsers import StructuredOutputParser, ResponseSchema
 
 # ------------------- 1. 环境 & 路径 -------------------
 load_dotenv()
@@ -30,21 +34,31 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ------------------- 2. 创建/加载 Chroma 向量库 -------------------
 if not os.path.exists(persist_directory):
-    # 读取所有 chunk_*.txt 并带上 source 元数据
+    print("正在构建新的 Chroma 数据库...")
     chunks = []
     texts = []
     metadatas = []
 
     if os.path.isdir(OUTPUT_DIR):
+        # 遍历 output 目录下的所有 txt 分块
         for fn in sorted(os.listdir(OUTPUT_DIR)):
             if fn.startswith("chunk_") and fn.endswith(".txt"):
                 path = os.path.join(OUTPUT_DIR, fn)
+
+                # 获取不带后缀的 ID，例如 chunk_Chapter_2_0
+                chunk_id = fn.replace(".txt", "")
+
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
-                    texts.append(content)
-                    metadatas.append({"source": fn})  # 关键：保存文件名
+
+
+                    text_with_id = f"来源ID: {chunk_id}\n{content}"
+
+                    texts.append(text_with_id)
+                    metadatas.append({"source": fn})
+
         if not texts:
-            raise FileNotFoundError(f"{OUTPUT_DIR} 中未找到 chunk_*.txt")
+            raise FileNotFoundError(f"{OUTPUT_DIR} 中未找到 chunk_*.txt，请先确保运行了 init.py")
     else:
         raise FileNotFoundError(f"{OUTPUT_DIR} 不存在")
 
@@ -52,10 +66,10 @@ if not os.path.exists(persist_directory):
     vectorstore = Chroma.from_texts(
         texts=texts,
         embedding=embeddings,
-        metadatas=metadatas,  # 关键：传入元数据
+        metadatas=metadatas,
         persist_directory=persist_directory
     )
-    print("Chroma 数据库创建完成（已包含 source 元数据）")
+    print(f"Chroma 数据库构建完成，共载入 {len(texts)} 个分块")
 else:
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
@@ -92,9 +106,9 @@ prompt_template = """
 
 示例：
 - 问题: 什么是敏捷开发？
-- 上下文: chunk_10: Agile means iterative development...
+- 上下文: chunk_Chapter_2_10: Agile means iterative development...
 - 答案: 敏捷开发是一种迭代和增量开发的软件开发方法。
-- 来源: chunk_10
+- 来源: chunk_Chapter_2_10
 
 基于以下课程上下文，回答问题。优先提取关键信息，若信息不足，可基于相关概念推测或总结，并注明来源块编号。若完全无法回答，说“未知”。
 
@@ -138,8 +152,106 @@ def cached_rag(query: str) -> str:
     return result
 
 
+# ==============================================================================
+# ------------------- 新增模块：个性化练习生成 (Quiz Generation) -------------------
+# ==============================================================================
+
+# 1. 优化 Schema 定义：明确告诉 LLM 选项是一个纯文本列表
+response_schemas = [
+    ResponseSchema(name="question", description="题目内容，必须清晰完整"),
+    ResponseSchema(name="options",
+                   description="包含4个字符串的列表（List[str]），分别代表A、B、C、D四个选项的具体描述。注意：不要在字符串里包含 'A.' 或 '1.' 等前缀，只写内容。"),
+    ResponseSchema(name="answer", description="正确选项的字母，仅输出 'A', 'B', 'C', or 'D'"),
+    ResponseSchema(name="explanation", description="答案解析，解释正确原因及干扰项错误原因")
+]
+
+# 初始化解析器
+output_parser = StructuredOutputParser.from_response_schemas(response_schemas)
+format_instructions = output_parser.get_format_instructions()
+
+
+def generate_quiz_func(topic: str):
+    """
+    功能：基于输入的知识点，检索课程内容，生成一道单选题。
+    """
+    if not topic or not topic.strip():
+        return "⚠️ 请输入一个具体的知识点，例如：'敏捷开发' 或 '项目生命周期'。"
+
+    print(f"📝 正在为知识点 '{topic}' 生成练习题...")
+
+    try:
+        # 1. 检索素材
+        docs = retriever.invoke(topic)
+
+        # 容错处理：如果没有检索到，给一个空字符串，让 Prompt 决定怎么做
+        if docs:
+            context_text = "\n".join([d.page_content for d in docs[:3]])
+        else:
+            context_text = "（未检索到具体课程内容，请基于该知识点的通用概念出题）"
+
+        # 2. 构建 Prompt
+        # 优化策略：
+        quiz_template = """
+        你是一名专业的大学课程出题老师。请针对目标【知识点】出一道单项选择题。
+
+        【参考课程内容】：
+        {context}
+
+        【目标知识点】：{topic}
+
+        【出题要求】：
+        1. 优先依据【参考课程内容】出题。如果内容中未包含具体细节（如仅有标题），请基于你对该【目标知识点】的专业知识进行补全，确保题目逻辑通顺。
+        2. 题目难度适中，适合大学生复习。
+        3. 选项（options）必须是包含4个具体描述的列表，不要包含 "A." 等前缀。
+        4. 必须严格遵守下方的 JSON 格式输出。
+
+        {format_instructions}
+        """
+
+        prompt = PromptTemplate(
+            template=quiz_template,
+            input_variables=["context", "topic"],
+            partial_variables={"format_instructions": format_instructions}
+        )
+
+        # 3. 调用 LLM 生成
+        chain = prompt | llm
+        response = chain.invoke({"context": context_text, "topic": topic})
+
+        # 4. 解析结果并格式化
+        try:
+            # 解析 LLM 返回的 JSON
+            data = output_parser.parse(response.content)
+
+            # 容错检查：确保 options 有 4 个
+            opts = data.get('options', [])
+            while len(opts) < 4:
+                opts.append("（生成选项不足）")
+
+            # 格式化输出
+            display_text = (
+                f"### 🎯 个性化练习题\n\n"
+                f"**❓ 题目**: {data['question']}\n\n"
+                f"**选项**:\n"
+                f"A. {opts[0]}\n"
+                f"B. {opts[1]}\n"
+                f"C. {opts[2]}\n"
+                f"D. {opts[3]}\n\n"
+                f"---\n"
+                f"**✅ 参考答案**: {data['answer']}\n\n"
+                f"**💡 解析**: {data['explanation']}\n"
+            )
+            return display_text
+
+        except Exception as parse_err:
+            print(f"JSON 解析失败: {parse_err}")
+            return f"⚠️ 题目生成数据解析错误，请重试。\n\n原始返回:\n{response.content}"
+
+    except Exception as e:
+        return f"❌ 系统错误: {str(e)}"
+
 # ------------------- 6. 测试 RAG（磁盘缓存 + 跨进程命中） -------------------
-query = "组织结构有哪几种类型？请描述每种类型对项目管理的影响，并举例说明。"
+query = "解释项目阶段（Project Phase）和项目生命周期（Project Life Cycle）的概念，并区分项目开发与产品开发。"
 
 try:
     # 1）检索调试（仅在缓存未命中时执行）
@@ -192,20 +304,63 @@ async def ask_question(question: str) -> str:
     try:
         loop = asyncio.get_event_loop()
         start = time.time()
-        answer = await loop.run_in_executor(None, lambda: qa_chain.run(question))
-        elapsed = time.time() - start
-        return f"回答: {answer}\n\n响应时间: {elapsed:.2f} 秒"
-    except Exception as e:
-        return f"错误: {str(e)}"
 
-iface = gradio.Interface(
+        # 1. 获取 LLM 的原始回答
+        full_response = await loop.run_in_executor(None, lambda: qa_chain.run(question))
+        elapsed = time.time() - start
+
+        # 2. 使用【新正则表达式】提取来源 ID
+        # 解释：匹配 chunk_ 开头，后面跟着 字母、数字、下划线、点、横杠 或 中文
+        pattern = r"(chunk_[\w\.\-\u4e00-\u9fff]+)"
+        sources = re.findall(pattern, full_response)
+
+        # 去重并格式化来源
+        unique_sources = list(set(sources))
+
+        # 3. 构造最终显示的文本
+
+
+        display_text = f"💡 **回答**:\n{full_response}\n\n"
+        display_text += f"⏱️ **耗时**: {elapsed:.2f} 秒\n"
+
+        if unique_sources:
+            display_text += f"📚 **检测到的来源文件**: {', '.join(unique_sources)}"
+        else:
+            display_text += "⚠️ 未检测到明确的来源引用 (可能是通用知识回答)"
+
+        return display_text
+
+    except Exception as e:
+        return f"❌ 错误: {str(e)}"
+
+# ------------------- 7. Gradio UI (升级版：多功能面板) -------------------
+
+# Tab 1: 课程问答界面
+qa_interface = gradio.Interface(
     fn=ask_question,
-    inputs=gradio.Textbox(label="输入问题", placeholder="在这里输入你的课程问题..."),
-    outputs=gradio.Textbox(label="答案"),
-    title="LearnMate DeepSeek RAG 测试",
-    description="基于课程 PDF 的智能问答系统（MMR 检索，动态 k）",
-    allow_flagging="never"
+    inputs=gradio.Textbox(label="💬 课程提问", placeholder="例如：敏捷开发的核心价值观是什么？", lines=2),
+    outputs=gradio.Markdown(label="🤖 AI 回答"), # 使用 Markdown 渲染富文本
+    allow_flagging="never",
+    description="**基于 RAG 技术**：精准检索课程讲义与视频字幕，提供带溯源的专业解答。"
+)
+
+# Tab 2: 练习生成界面
+quiz_interface = gradio.Interface(
+    fn=generate_quiz_func,
+    inputs=gradio.Textbox(label="🎯 输入知识点", placeholder="例如：Scrum 流程 / 瀑布模型 / 风险管理", lines=1),
+    outputs=gradio.Markdown(label="📝 生成的练习题"),
+    allow_flagging="never",
+    description="**个性化练习**：输入你想复习的知识点，AI 将基于课程资料为你生成一道单选题及解析。"
+)
+
+# 主程序：使用 TabbedInterface 组合两个功能
+demo = gradio.TabbedInterface(
+    [qa_interface, quiz_interface],
+    ["📚 课程问答", "✍️ 个性化练习"],
+    title="🎓 LearnMate 个性化学习伙伴 (MVP Alpha)",
+    theme="soft"
 )
 
 if __name__ == "__main__":
-    iface.launch()
+    print("🚀 正在启动 LearnMate Web 服务...")
+    demo.launch(share=False)
