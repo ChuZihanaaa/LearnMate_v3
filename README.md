@@ -17,7 +17,7 @@ git clone https://github.com/miaojiayi123/LearnMate.git
 cd LearnMate
 
 # 2. 安装
-pip install -r requirement.txt
+pip install -r requirements.txt
 
 # 3. 放入 PDF
 mkdir input && cp "你的PDF路径/Chapter 2.pdf" input/
