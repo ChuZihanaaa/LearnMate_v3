@@ -124,6 +124,52 @@ LearnMate/
 ├── requirements.txt      # 项目依赖
 └── .env                  # 环境变量配置
 ```
+# LearnMate 部署问题速查手册  
+&gt; 适用版本：Python 3.12 + Windows 10/11（64-bit）
+
+---
+
+## 一、环境准备阶段
+
+| 问题现象 | 根因 | 解决方案 |
+| --- | --- | --- |
+| `pip install` 卡在 **Preparing metadata (pyproject.toml)...** | PyMuPDF 无预编译 wheel → 被迫本地编译；机器缺少 MSVC 工具链 | ① 升级 pip&lt;br&gt;② 改用官方源并强制拉 wheel：&lt;br&gt;`pip install -i https://pypi.org/simple --only-binary :all: pymupdf==1.24.11` |
+| **langchain&gt;=1.0.0 找不到** | 清华镜像未同步 / 被墙 | 同一行命令切回官方源即可 |
+| **ModuleNotFoundError: No module named 'audioop'** | Python 3.13 已移除 audioop；pydub 0.25.1 未带 3.13 预编译扩展 | 直接 **换用 3.12**（官方自带 audioop），或给 3.13 装 VS Build Tools 后重装 pydub |
+| **ModuleNotFoundError: No module named 'pyaudioop'** | 同上，旧版 pydub 回退包名写死，但 PyPI 无此包 | 同上攻；无需安装任何 pyaudioop |
+
+---
+
+## 二、运行阶段
+
+| 问题现象 | 根因 | 解决方案 |
+| --- | --- | --- |
+| **HTTPSConnectionPool(host='huggingface.co', port=443)... WinError 10051** | 本地网络无法连接 Hugging Face | ① 临时给代理：&lt;br&gt;`$env:HTTPS_PROXY="http://127.0.0.1:你的端口"`&lt;br&gt;② 手动下载模型 → 改本地路径：&lt;br&gt;`SentenceTransformer(r"models\all-MiniLM-L6-v2")` |
+| **Gradio 页面空白 / 加载转圈** | 4.44 默认 CDN 被墙，静态资源拉不到 | `pip install -U gradio`（4.44.1+ 自动切国内镜像）&lt;br&gt;或&lt;br&gt;`set GRADIO_CDN=0` 强制走本地资源 |
+| **TypeError: BlockContext.__init__() got an unexpected keyword argument 'allow_flagging'** | 代码用 3.x API，与 4.x 不兼容 | ① 降级：`pip install "gradio&lt;4"`&lt;br&gt;② 或删掉 `allow_flagging=...` 参数 |
+| **share=True 创建链接失败** | 同样因无法连接 Gradio 隧道服务器 | 本地使用可忽略；若需外网访问，先保证代理通畅再设 `share=True` |
+
+---
+
+## 三、常用一键命令备忘
+
+```powershell
+# 1. 升级 pip & 装依赖（官方 wheel 最全）
+python -m pip install -U pip
+pip install -r requirements.txt -i https://pypi.org/simple --prefer-binary
+
+# 2. 降级 Gradio（兼容旧代码）
+pip install "gradio&lt;4"
+
+# 3. 代理环境（临时）
+$env:HTTP_PROXY="http://127.0.0.1:7890"
+$env:HTTPS_PROXY="http://127.0.0.1:7890"
+
+# 4. 启动后端
+uvicorn api.api:app --reload        # FastAPI 文档 http://127.0.0.1:8000/docs
+
+# 5. 启动 Web 界面
+python scripts\rag_deepseek_api.py  # Gradio 界面 http://127.0.0.1:7860
 
 ## 📝 开发日志
 
