@@ -2,12 +2,14 @@ import os
 import time
 import gradio
 import asyncio
+import fitz  # PyMuPDF
 from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_classic.chains import RetrievalQA
 from langchain_classic.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import re
 
 from functools import lru_cache
@@ -250,6 +252,157 @@ def generate_quiz_func(topic: str):
     except Exception as e:
         return f"❌ 系统错误: {str(e)}"
 
+
+# ==============================================================================
+# ------------------- 新增模块：文件上传处理 (File Upload) -------------------
+# ==============================================================================
+
+def preprocess_pdf(pdf_path: str):
+    """处理 PDF 文件并返回分块文本列表"""
+    print(f"正在处理 PDF: {pdf_path}")
+    doc = fitz.open(pdf_path)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    doc.close()
+    
+    # 清洗逻辑
+    cleaned_text = re.sub(r'\n+', ' ', text)
+    cleaned_text = re.sub(r'[^\w\s\u4e00-\u9fff]', '', cleaned_text)
+    
+    # 分块
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    chunks = splitter.split_text(cleaned_text)
+    
+    return chunks, os.path.basename(pdf_path)
+
+
+def preprocess_srt(srt_path: str):
+    """处理 SRT 字幕文件并返回分块文本列表"""
+    print(f"正在处理字幕: {srt_path}")
+    
+    with open(srt_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    
+    text_content = []
+    for line in lines:
+        line = line.strip()
+        # 跳过纯数字（字幕序号）
+        if line.isdigit():
+            continue
+        # 跳过时间轴
+        if '-->' in line:
+            continue
+        # 跳过空行
+        if not line:
+            continue
+        text_content.append(line)
+    
+    # 合并为完整文本
+    full_text = " ".join(text_content)
+    cleaned_text = re.sub(r'\s+', ' ', full_text)
+    
+    # 分块
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    chunks = splitter.split_text(cleaned_text)
+    
+    return chunks, os.path.basename(srt_path)
+
+
+def add_documents_to_vectorstore(chunks, source_filename):
+    """将新的文档分块添加到现有的向量库中"""
+    global vectorstore, retriever, qa_chain
+    
+    # 准备文本和元数据
+    texts = []
+    metadatas = []
+    base_name = os.path.splitext(os.path.basename(source_filename))[0]
+    base_name = base_name.replace(" ", "_")
+    
+    for i, chunk in enumerate(chunks):
+        chunk_id = f"chunk_{base_name}_{i}"
+        text_with_id = f"来源ID: {chunk_id}\n{chunk}"
+        texts.append(text_with_id)
+        metadatas.append({"source": f"{chunk_id}.txt"})
+        
+        # 同时保存到 output 目录
+        out_name = f"{chunk_id}.txt"
+        with open(os.path.join(OUTPUT_DIR, out_name), "w", encoding="utf-8") as f:
+            f.write(chunk)
+    
+    # 添加到向量库
+    if texts:
+        vectorstore.add_texts(texts=texts, metadatas=metadatas)
+        print(f"✅ 成功添加 {len(texts)} 个分块到向量库")
+        
+        # 更新检索器和 QA 链
+        retriever = vectorstore.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": 15, "fetch_k": 30}
+        )
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=retriever,
+            chain_type_kwargs={"prompt": PROMPT}
+        )
+    
+    return len(texts)
+
+
+def handle_file_upload(uploaded_file):
+    """处理上传的文件"""
+    if uploaded_file is None:
+        return "⚠️ 请先选择要上传的文件（支持 PDF 或 SRT 格式）"
+    
+    try:
+        # Gradio 4.44.1 中 File 组件返回文件对象，需要获取 name 属性
+        if isinstance(uploaded_file, str):
+            file_path = uploaded_file
+        elif hasattr(uploaded_file, 'name'):
+            file_path = uploaded_file.name
+        else:
+            # 兼容其他可能的返回格式
+            file_path = str(uploaded_file)
+        
+        file_name = os.path.basename(file_path)
+        file_ext = os.path.splitext(file_name)[1].lower()
+        
+        # 检查文件类型
+        if file_ext not in ['.pdf', '.srt']:
+            return f"❌ 不支持的文件格式: {file_ext}\n\n支持格式: PDF (.pdf) 或 字幕文件 (.srt)"
+        
+        # 处理文件
+        if file_ext == '.pdf':
+            chunks, source_name = preprocess_pdf(file_path)
+        else:  # .srt
+            chunks, source_name = preprocess_srt(file_path)
+        
+        if not chunks:
+            return f"⚠️ 文件处理失败：未能从 {file_name} 中提取到有效内容"
+        
+        # 添加到向量库
+        chunk_count = add_documents_to_vectorstore(chunks, source_name)
+        
+        # 返回成功消息
+        result = (
+            f"✅ **文件上传成功！**\n\n"
+            f"📄 **文件名**: {file_name}\n"
+            f"📊 **处理结果**: 生成 {chunk_count} 个文本分块\n"
+            f"💾 **存储位置**: {OUTPUT_DIR}\n"
+            f"🔍 **向量库**: 已更新，现在可以基于此文件内容进行问答和练习生成\n\n"
+            f"💡 **提示**: 你现在可以在「课程问答」或「个性化练习」标签页中使用新上传的内容了！"
+        )
+        
+        return result
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"❌ **处理文件时发生错误**:\n\n```\n{str(e)}\n```\n\n**详细错误信息**:\n```\n{traceback.format_exc()}\n```"
+        print(f"文件上传错误: {traceback.format_exc()}")
+        return error_msg
+
+
 # ------------------- 6. 测试 RAG（磁盘缓存 + 跨进程命中） -------------------
 query = "解释项目阶段（Project Phase）和项目生命周期（Project Life Cycle）的概念，并区分项目开发与产品开发。"
 
@@ -353,14 +506,26 @@ quiz_interface = gradio.Interface(
     description="**个性化练习**：输入你想复习的知识点，AI 将基于课程资料为你生成一道单选题及解析。"
 )
 
-# 主程序：使用 TabbedInterface 组合两个功能
+# Tab 3: 文件上传界面
+upload_interface = gradio.Interface(
+    fn=handle_file_upload,
+    inputs=gradio.File(
+        label="📤 上传课程文件",
+        file_types=[".pdf", ".srt"]
+    ),
+    outputs=gradio.Markdown(label="📋 处理结果"),
+    allow_flagging="never",
+    description="**文件上传**：上传 PDF 讲义或 SRT 字幕文件，系统将自动处理并添加到知识库中，支持后续问答和练习生成。"
+)
+
+# 主程序：使用 TabbedInterface 组合三个功能
 demo = gradio.TabbedInterface(
-    [qa_interface, quiz_interface],
-    ["📚 课程问答", "✍️ 个性化练习"],
+    [qa_interface, quiz_interface, upload_interface],
+    ["📚 课程问答", "✍️ 个性化练习", "📤 文件上传"],
     title="🎓 LearnMate 个性化学习伙伴 (MVP Alpha)",
     theme="soft"
 )
 
 if __name__ == "__main__":
     print("🚀 正在启动 LearnMate Web 服务...")
-    demo.launch(share=False)
+    demo.launch(share=True)
