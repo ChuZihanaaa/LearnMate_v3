@@ -34,12 +34,12 @@
     &quot;assignee&quot;: &quot;ChuZihanaaa&quot;
   }
 }</component>
-  <component name="GithubPullRequestsUISettings">{
-  &quot;selectedUrlAndAccountId&quot;: {
-    &quot;url&quot;: &quot;https://github.com/miaojiayi123/LearnMate.git&quot;,
-    &quot;accountId&quot;: &quot;477aa554-e8b2-4ab7-bf16-eaf445f4641e&quot;
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/ChuZihanaaa/LearnMate.git",
+    "accountId": "477aa554-e8b2-4ab7-bf16-eaf445f4641e"
   }
-}</component>
+}]]></component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 6
 }</component>
@@ -98,7 +98,15 @@
       <option name="project" value="LOCAL" />
       <updated>1765357177704</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="rag_deepseek_api.py update">
+      <option name="closed" value="true" />
+      <created>1765370817185</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1765370817185</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
