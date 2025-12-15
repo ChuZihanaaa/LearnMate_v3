@@ -1,0 +1,1 @@
+times  are in days 1 How many paths are on this network diagram 2 How long is each path 3 Which is the critical path 4 What is the shortest amount of time needed to complete this  project Information Technology Project  Management Seventh Edition 81

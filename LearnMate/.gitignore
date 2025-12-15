@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+*.pdf
+chroma_db/
+rag_cache/
+.DS_Store
+*.log
